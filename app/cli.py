@@ -10,7 +10,6 @@ import argparse
 import json
 import sys
 
-from .scanner.base import Severity
 from .scanner.engine import scan
 
 _COLOURS = {

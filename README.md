@@ -121,4 +121,4 @@ python -m unittest discover -s tests -v
 
 ## Licence
 
-MIT
+MIT — see [LICENSE](LICENSE).
