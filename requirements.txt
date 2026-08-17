@@ -1,0 +1,5 @@
+# The scanning engine (app/scanner/) has zero third-party dependencies.
+# These are only needed for the HTTP API layer.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
