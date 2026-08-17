@@ -1,5 +1,7 @@
 # Security Posture Scanner
 
+[![CI](https://github.com/TheoLeburu/security-posture-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/TheoLeburu/security-posture-scanner/actions/workflows/ci.yml)
+
 Grades a website's HTTP header and TLS configuration, explains what each finding means, and tells you how to fix it.
 
 Point it at a domain you own and it returns a letter grade from A to F, a per-check score, and a remediation step for every issue found. Built as a reusable Python library first, with an HTTP API and a CLI as two interfaces onto the same engine.
