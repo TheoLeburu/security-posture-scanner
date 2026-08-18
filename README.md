@@ -97,11 +97,13 @@ app/
 └── cli.py            # Command-line interface
 ```
 
-Three decisions worth calling out:
+Four decisions worth calling out:
 
 **The engine has no third-party dependencies.** Everything in `app/scanner/` uses only `ssl`, `socket`, and `http.client`. That makes the engine embeddable in a CLI, a Lambda, or a cron job without dragging a web framework along, and it keeps the supply-chain surface of the security-critical code at zero.
 
 **Data is collected once and shared.** All checks read from a single `ScanContext` populated by three requests. Six checks each opening their own connection would be both slower and ruder to the target.
+
+**The scanner refuses to scan private infrastructure.** A tool that fetches a URL on an anonymous caller's behalf is an SSRF engine unless it is stopped from being pointed inwards. Validation happens in two stages: `normalise_target` rejects IP literals and local-looking names on syntax, and `assert_public_hostname` then checks what the name actually resolves to, rejecting loopback, RFC 1918, link-local (including the cloud metadata address at 169.254.169.254), and IPv4-mapped equivalents. DNS rebinding is still possible and is documented as such in the code rather than papered over.
 
 **One failing check cannot abort a scan.** `Check.execute()` catches exceptions per check and records them as an error on that check's result. A malformed header on an obscure site degrades one score instead of returning a 500.
 
@@ -111,7 +113,7 @@ Three decisions worth calling out:
 python -m unittest discover -s tests -v
 ```
 
-30 tests, all offline. Network behaviour is represented by fixture `ScanContext` objects, so the suite is deterministic, runs in milliseconds, and never sends traffic to third-party hosts from CI.
+42 tests, all offline. Network behaviour is represented by fixture `ScanContext` objects and an injectable resolver, so the suite is deterministic, runs in milliseconds, and never sends traffic to third-party hosts from CI. The API tests need the dev dependencies (`pip install -r requirements-dev.txt`); the engine tests need nothing but the standard library.
 
 ## Roadmap
 

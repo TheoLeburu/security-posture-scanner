@@ -38,11 +38,39 @@ app.add_middleware(
 # request relay for anyone who finds it.
 RATE_LIMIT_REQUESTS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60
+
+# How often to discard clients that have gone quiet. Without this the log
+# gains one permanent entry per unique IP and never gives the memory back,
+# which is a slow leak on any endpoint exposed to the internet.
+SWEEP_INTERVAL_SECONDS = 300
+
+# This state is per-process, so running uvicorn with multiple workers gives
+# each worker its own allowance and the effective limit becomes
+# RATE_LIMIT_REQUESTS * workers. A shared store such as Redis is the fix if
+# this is ever deployed behind more than one worker.
 _request_log: dict[str, deque[float]] = defaultdict(deque)
+_last_sweep = time.monotonic()
+
+
+def _sweep_expired(now: float) -> None:
+    """Drop clients whose most recent request has fallen out of the window."""
+    stale = [
+        ip
+        for ip, log in _request_log.items()
+        if not log or now - log[-1] > RATE_LIMIT_WINDOW_SECONDS
+    ]
+    for ip in stale:
+        del _request_log[ip]
 
 
 def _enforce_rate_limit(client_ip: str) -> None:
+    global _last_sweep
+
     now = time.monotonic()
+    if now - _last_sweep >= SWEEP_INTERVAL_SECONDS:
+        _last_sweep = now
+        _sweep_expired(now)
+
     log = _request_log[client_ip]
     while log and now - log[0] > RATE_LIMIT_WINDOW_SECONDS:
         log.popleft()

@@ -8,11 +8,16 @@ run in CI without reaching out to third-party hosts.
 from __future__ import annotations
 
 import datetime as dt
+import time
 import unittest
+
+from fastapi import HTTPException
+
+from app import main
 
 from app.scanner.base import ScanContext, Severity, Target
 from app.scanner.cookies import CookieFlagsCheck, InformationDisclosureCheck
-from app.scanner.engine import normalise_target, scan
+from app.scanner.engine import assert_public_hostname, normalise_target, scan
 from app.scanner.grading import grade_results, letter_for_score
 from app.scanner.headers import SecurityHeadersCheck
 from app.scanner.tls import analyse_tls_info
@@ -203,6 +208,114 @@ class GradingTests(unittest.TestCase):
     def test_all_skipped_grades_f(self):
         grade = grade_results([], {})
         self.assertEqual(grade.letter, "F")
+
+
+def fake_resolver(*addresses: str):
+    """Build a getaddrinfo stand-in that resolves any name to `addresses`."""
+
+    def resolve(host, port, *args, **kwargs):
+        return [(2, 1, 6, "", (address, port)) for address in addresses]
+
+    return resolve
+
+
+class SSRFGuardTests(unittest.TestCase):
+    """The scanner must refuse to be aimed at internal infrastructure.
+
+    The API exposes scanning to anonymous callers, so target validation is a
+    security control rather than input tidiness.
+    """
+
+    def test_ip_literals_are_rejected(self):
+        for raw in [
+            "127.0.0.1",
+            "169.254.169.254",  # cloud instance metadata
+            "10.0.0.5",
+            "192.168.1.1",
+            "172.16.0.1",
+            "[::1]",
+            "8.8.8.8",  # public, but still a bare IP
+        ]:
+            with self.subTest(target=raw), self.assertRaises(ValueError):
+                normalise_target(raw)
+
+    def test_local_names_are_rejected(self):
+        for raw in ["localhost", "router.local", "db.internal", "box.localdomain"]:
+            with self.subTest(target=raw), self.assertRaises(ValueError):
+                normalise_target(raw)
+
+    def test_public_hostname_is_still_accepted(self):
+        self.assertEqual(normalise_target("Example.COM").hostname, "example.com")
+
+
+class ResolutionGuardTests(unittest.TestCase):
+    """A public-looking name can still resolve somewhere private."""
+
+    def test_name_resolving_to_metadata_endpoint_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            assert_public_hostname(
+                "metadata.example.com", resolver=fake_resolver("169.254.169.254")
+            )
+        self.assertIn("169.254.169.254", str(ctx.exception))
+
+    def test_name_resolving_publicly_is_allowed(self):
+        assert_public_hostname("example.com", resolver=fake_resolver("93.184.216.34"))
+
+    def test_one_internal_address_among_several_is_enough_to_reject(self):
+        with self.assertRaises(ValueError):
+            assert_public_hostname(
+                "split.example.com", resolver=fake_resolver("93.184.216.34", "10.0.0.5")
+            )
+
+    def test_ipv4_mapped_loopback_is_rejected(self):
+        with self.assertRaises(ValueError):
+            assert_public_hostname(
+                "mapped.example.com", resolver=fake_resolver("::ffff:127.0.0.1")
+            )
+
+    def test_resolution_failure_surfaces_as_value_error(self):
+        def unresolvable(*args, **kwargs):
+            raise OSError("Name or service not known")
+
+        with self.assertRaises(ValueError):
+            assert_public_hostname("nope.example.com", resolver=unresolvable)
+
+
+class RateLimitTests(unittest.TestCase):
+    """The per-IP log must not grow without bound."""
+
+    def setUp(self):
+        main._request_log.clear()
+
+    def tearDown(self):
+        main._request_log.clear()
+
+    def test_requests_below_the_limit_are_allowed(self):
+        for _ in range(main.RATE_LIMIT_REQUESTS):
+            main._enforce_rate_limit("203.0.113.1")
+        self.assertEqual(len(main._request_log["203.0.113.1"]), main.RATE_LIMIT_REQUESTS)
+
+    def test_exceeding_the_limit_raises_429(self):
+        for _ in range(main.RATE_LIMIT_REQUESTS):
+            main._enforce_rate_limit("203.0.113.2")
+        with self.assertRaises(HTTPException) as ctx:
+            main._enforce_rate_limit("203.0.113.2")
+        self.assertEqual(ctx.exception.status_code, 429)
+
+    def test_quiet_clients_are_evicted_by_the_sweep(self):
+        now = time.monotonic()
+        for i in range(500):
+            main._request_log[f"198.51.100.{i}"].append(now)
+        self.assertEqual(len(main._request_log), 500)
+
+        main._sweep_expired(now + main.RATE_LIMIT_WINDOW_SECONDS + 1)
+        self.assertEqual(len(main._request_log), 0)
+
+    def test_sweep_keeps_clients_still_inside_the_window(self):
+        now = time.monotonic()
+        main._request_log["198.51.100.7"].append(now)
+        main._sweep_expired(now + 1)
+        self.assertIn("198.51.100.7", main._request_log)
 
 
 class TargetNormalisationTests(unittest.TestCase):
